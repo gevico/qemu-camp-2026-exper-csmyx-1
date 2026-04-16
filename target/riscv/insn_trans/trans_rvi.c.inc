@@ -1224,59 +1224,140 @@ static bool trans_csrrci(DisasContext *ctx, arg_csrrci * a)
     }
 }
 
-static bool trans_dma(DisasContext *ctx, arg_dma * a)
+static bool trans_dma(DisasContext *ctx, arg_dma *a)
 {
-    TCGv N = tcg_temp_new();
-    TCGv i = tcg_temp_new();
-    TCGv j = tcg_temp_new();
-    TCGv src_addr = tcg_temp_new();
-    TCGv dst_addr = tcg_temp_new();
-    TCGv_i32 val = tcg_temp_new_i32();
+    /*
+     * Transpose an N×N matrix of float32 (4-byte elements).
+     * N = 8 << rs2  (grain=0 → 8×8, grain=1 → 16×16, grain=2 → 32×32)
+     * rs1 = src base, rd = dst base
+     *
+     * dst[j*N + i] = src[i*N + j]
+     *
+     * Instead of recomputing i*N+j and j*N+i each iteration with multiplies,
+     * we track running pointers:
+     *   src_row advances by 4 each j step (sequential read along row i)
+     *   dst_ptr advances by stride (N*4) each j step (column-stride write)
+     * At the end of each i step:
+     *   src_row advances by stride (next row)
+     *   dst_col advances by 4 (next column base)
+     */
+    MemOp mop = MO_UL | mo_endian(ctx);
 
+    TCGv N        = tcg_temp_new();
+    TCGv stride   = tcg_temp_new(); /* N * 4 */
+    TCGv src_base = tcg_temp_new();
+    TCGv dst_base = tcg_temp_new();
+    TCGv i        = tcg_temp_new();
+    TCGv src_row  = tcg_temp_new(); /* ptr to start of row i in src */
+    TCGv dst_col  = tcg_temp_new(); /* ptr to start of col i in dst */
+    TCGv j        = tcg_temp_new();
+    TCGv src_ptr  = tcg_temp_new();
+    TCGv dst_ptr  = tcg_temp_new();
+    TCGv_i32 val  = tcg_temp_new_i32(); /* fp32 element — use i32 explicitly */
+
+    /* N = 8 << grain */
     tcg_gen_movi_tl(N, 8);
-    tcg_gen_shl_tl(N, N, get_gpr(ctx, a->rs2, EXT_NONE)); // N = 8 << gpr[rs2]
-    TCGv src_base = get_gpr(ctx, a->rs1, EXT_NONE); // src = gpr[rs1]
-    TCGv dst_base = get_gpr(ctx, a->rd, EXT_NONE); // dst = gpr[rd]
+    tcg_gen_shl_tl(N, N, get_gpr(ctx, a->rs2, EXT_NONE));
 
-    // outer loop
+    /* stride = N * 4 */
+    tcg_gen_shli_tl(stride, N, 2);
+
+    /* snapshot base pointers into temps so the loop can't alias them */
+    tcg_gen_mov_tl(src_base, get_gpr(ctx, a->rs1, EXT_NONE));
+    tcg_gen_mov_tl(dst_base, get_gpr(ctx, a->rd,  EXT_NONE));
+
     TCGLabel *l_i_loop = gen_new_label();
-    TCGLabel *l_i_end = gen_new_label();
+    TCGLabel *l_i_end  = gen_new_label();
     tcg_gen_movi_tl(i, 0);
+    tcg_gen_mov_tl(src_row, src_base);
+    tcg_gen_mov_tl(dst_col, dst_base);
+
     gen_set_label(l_i_loop);
-    tcg_gen_brcond_tl(TCG_COND_GE, i, N, l_i_end); // break if i >= N
+    tcg_gen_brcond_tl(TCG_COND_GE, i, N, l_i_end);
 
-    // inner loop
     TCGLabel *l_j_loop = gen_new_label();
-    TCGLabel *l_j_end = gen_new_label();
+    TCGLabel *l_j_end  = gen_new_label();
     tcg_gen_movi_tl(j, 0);
+    tcg_gen_mov_tl(src_ptr, src_row);
+    tcg_gen_mov_tl(dst_ptr, dst_col);
+
     gen_set_label(l_j_loop);
-    tcg_gen_brcond_tl(TCG_COND_GE, j, N, l_j_end); // break if j >= N
+    tcg_gen_brcond_tl(TCG_COND_GE, j, N, l_j_end);
 
-    // loop body
-    tcg_gen_mul_tl(src_addr, i, N);
-    tcg_gen_add_tl(src_addr, src_addr, j);
-    tcg_gen_muli_tl(src_addr, src_addr, 4);
-    tcg_gen_add_tl(src_addr, src_addr, src_base);
+    tcg_gen_qemu_ld_i32(val, src_ptr, ctx->mem_idx, mop);
+    tcg_gen_qemu_st_i32(val, dst_ptr, ctx->mem_idx, mop);
 
-    tcg_gen_mul_tl(dst_addr, j, N);
-    tcg_gen_add_tl(dst_addr, dst_addr, i);
-    tcg_gen_muli_tl(dst_addr, dst_addr, 4);
-    tcg_gen_add_tl(dst_addr, dst_addr, dst_base);
-
-    // dst[j * N + i] = src[i * N + j]
-    tcg_gen_qemu_ld_i32(val, src_addr, ctx->mem_idx, MO_32);
-    tcg_gen_qemu_st_i32(val, dst_addr, ctx->mem_idx, MO_32);
-
-
-    // j++
+    tcg_gen_addi_tl(src_ptr, src_ptr, 4);      /* next element in row i */
+    tcg_gen_add_tl(dst_ptr, dst_ptr, stride);  /* next row in col i     */
     tcg_gen_addi_tl(j, j, 1);
     tcg_gen_br(l_j_loop);
     gen_set_label(l_j_end);
 
-    // i++
+    tcg_gen_add_tl(src_row, src_row, stride);  /* next row in src */
+    tcg_gen_addi_tl(dst_col, dst_col, 4);      /* next col in dst */
     tcg_gen_addi_tl(i, i, 1);
     tcg_gen_br(l_i_loop);
     gen_set_label(l_i_end);
-    
+
+    return true;
+}
+
+
+static bool trans_sort(DisasContext *ctx, arg_sort *a)
+{
+    MemOp mop = MO_SL | mo_endian(ctx);
+    TCGv A = tcg_temp_new();
+    TCGv N = tcg_temp_new();
+    TCGv K = tcg_temp_new();
+    TCGv i = tcg_temp_new();
+    TCGv j = tcg_temp_new();
+    TCGv i_bound = tcg_temp_new();
+    TCGv j_bound = tcg_temp_new();
+    TCGv A_j = tcg_temp_new();
+    TCGv A_j_1 = tcg_temp_new();
+    TCGv_i32 val  = tcg_temp_new_i32(); /* i32 element — use i32 explicitly */
+    TCGv_i32 val_1  = tcg_temp_new_i32(); /* i32 element — use i32 explicitly */
+    tcg_gen_mov_tl(A, get_gpr(ctx, a->rs1, EXT_NONE));
+    tcg_gen_mov_tl(N, get_gpr(ctx, a->rs2, EXT_NONE));
+    tcg_gen_mov_tl(K, get_gpr(ctx, a->rd, EXT_NONE));
+
+    TCGLabel *l_i_loop = gen_new_label();
+    TCGLabel *l_i_end  = gen_new_label();
+    tcg_gen_movi_tl(i, 0);
+    tcg_gen_subi_tl(i_bound, K, 1);
+
+    gen_set_label(l_i_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, i, i_bound, l_i_end);
+
+    TCGLabel *l_j_loop = gen_new_label();
+    TCGLabel *l_j_end  = gen_new_label();
+    tcg_gen_mov_tl(A_j, A);
+    tcg_gen_addi_tl(A_j_1, A, 4);
+    tcg_gen_movi_tl(j, 0);
+    tcg_gen_sub_tl(j_bound, K, i);
+    tcg_gen_subi_tl(j_bound, j_bound, 1);
+
+    gen_set_label(l_j_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, j, j_bound, l_j_end);
+
+    tcg_gen_qemu_ld_i32(val, A_j, ctx->mem_idx, mop);
+    tcg_gen_qemu_ld_i32(val_1, A_j_1, ctx->mem_idx, mop);
+
+    TCGLabel *l_if_end = gen_new_label();
+    tcg_gen_brcond_i32(TCG_COND_LE, val, val_1, l_if_end);
+    tcg_gen_qemu_st_i32(val, A_j_1, ctx->mem_idx, mop);
+    tcg_gen_qemu_st_i32(val_1, A_j, ctx->mem_idx, mop);
+    gen_set_label(l_if_end);
+
+    tcg_gen_addi_tl(A_j, A_j, 4);        /* next A[j] */
+    tcg_gen_addi_tl(A_j_1, A_j_1, 4);    /* next A[j+1] */
+    tcg_gen_addi_tl(j, j, 1);
+    tcg_gen_br(l_j_loop);
+    gen_set_label(l_j_end);
+
+    tcg_gen_addi_tl(i, i, 1);
+    tcg_gen_br(l_i_loop);
+    gen_set_label(l_i_end);
+
     return true;
 }
