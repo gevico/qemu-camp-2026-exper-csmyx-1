@@ -1324,6 +1324,7 @@ static bool trans_sort(DisasContext *ctx, arg_sort *a)
     TCGLabel *l_i_loop = gen_new_label();
     TCGLabel *l_i_end  = gen_new_label();
     tcg_gen_movi_tl(i, 0);
+    /* i_bound = k-1 */
     tcg_gen_subi_tl(i_bound, K, 1);
 
     gen_set_label(l_i_loop);
@@ -1334,6 +1335,7 @@ static bool trans_sort(DisasContext *ctx, arg_sort *a)
     tcg_gen_mov_tl(A_j, A);
     tcg_gen_addi_tl(A_j_1, A, 4);
     tcg_gen_movi_tl(j, 0);
+    /* j_bound = k-i-1 */
     tcg_gen_sub_tl(j_bound, K, i);
     tcg_gen_subi_tl(j_bound, j_bound, 1);
 
@@ -1358,6 +1360,74 @@ static bool trans_sort(DisasContext *ctx, arg_sort *a)
     tcg_gen_addi_tl(i, i, 1);
     tcg_gen_br(l_i_loop);
     gen_set_label(l_i_end);
+
+    return true;
+}
+
+static bool trans_crush(DisasContext *ctx, arg_crush *a)
+{
+    MemOp mop = MO_8 | mo_endian(ctx);
+    TCGv_i32 N = tcg_temp_new_i32();
+    TCGv src_base = tcg_temp_new();
+    TCGv dst_base = tcg_temp_new();
+    TCGv src_addr = tcg_temp_new();
+    TCGv dst_addr = tcg_temp_new();
+    TCGv_i32 out_len = tcg_temp_new_i32();
+    TCGv_i32 i = tcg_temp_new_i32();
+    TCGv_i32 i_bound = tcg_temp_new_i32();
+    TCGv_i32 val = tcg_temp_new_i32();
+    TCGv_i32 val_1 = tcg_temp_new_i32();
+    tcg_gen_extrl_i64_i32(N, get_gpr(ctx, a->rs2, EXT_NONE));
+    tcg_gen_mov_tl(src_base, get_gpr(ctx, a->rs1, EXT_NONE));
+    tcg_gen_mov_tl(dst_base, get_gpr(ctx, a->rd, EXT_NONE));
+    tcg_gen_mov_tl(src_addr, src_base);
+    tcg_gen_mov_tl(dst_addr, dst_base);
+    /* out_len = (N+1)/2 */ 
+    tcg_gen_addi_i32(out_len, N, 1);
+    tcg_gen_shri_i32(out_len, out_len, 1);
+    /* i_bound = N/2 */
+    tcg_gen_shri_i32(i_bound, N, 1);
+
+    TCGLabel *l_i_loop = gen_new_label();
+    TCGLabel *l_i_end  = gen_new_label();
+    tcg_gen_movi_i32(i, 0);
+
+    gen_set_label(l_i_loop);
+    tcg_gen_brcond_i32(TCG_COND_GE, i, i_bound, l_i_end);
+    
+    tcg_gen_qemu_ld_i32(val, src_addr, ctx->mem_idx, mop);
+    tcg_gen_addi_tl(src_addr, src_addr, 1);
+    tcg_gen_andi_i32(val, val, 0x0f); /* get low 4 bits */
+    tcg_gen_qemu_ld_i32(val_1, src_addr, ctx->mem_idx, mop);
+    tcg_gen_addi_tl(src_addr, src_addr, 1);
+    tcg_gen_andi_i32(val_1, val_1, 0x0f); /* get low 4 bits */
+    tcg_gen_shli_i32(val_1, val_1, 4);
+    tcg_gen_or_i32(val, val_1, val);
+    tcg_gen_qemu_st_i32(val, dst_addr, ctx->mem_idx, mop);
+    tcg_gen_addi_tl(dst_addr, dst_addr, 1);
+
+    tcg_gen_addi_i32(i, i, 1);
+    tcg_gen_br(l_i_loop);
+    gen_set_label(l_i_end);
+
+    TCGLabel *l_if_end  = gen_new_label();
+    TCGv offset = tcg_temp_new();
+    tcg_gen_andi_i32(val, N, 0x1);
+    tcg_gen_brcond_i32(TCG_COND_EQ, val, 0, l_if_end);
+    tcg_gen_mov_tl(src_addr, src_base);
+    tcg_gen_mov_i32(val_1, N);
+    tcg_gen_subi_i32(val_1, val_1, 1);
+    tcg_gen_ext_i32_tl(offset, val_1);
+    tcg_gen_add_tl(src_addr, src_addr, offset);
+    tcg_gen_qemu_ld_i32(val, src_addr, ctx->mem_idx, mop);
+    tcg_gen_andi_i32(val, val, 0x0f); /* get low 4 bits */
+    tcg_gen_mov_tl(dst_addr, dst_base);
+    tcg_gen_mov_i32(val_1, out_len);
+    tcg_gen_subi_i32(val_1, val_1, 1);
+    tcg_gen_ext_i32_tl(offset, val_1);
+    tcg_gen_add_tl(dst_addr, dst_addr, offset);
+    tcg_gen_qemu_st_i32(val, dst_addr, ctx->mem_idx, mop);
+    gen_set_label(l_if_end);
 
     return true;
 }
