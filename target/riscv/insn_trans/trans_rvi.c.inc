@@ -1224,21 +1224,8 @@ static bool trans_csrrci(DisasContext *ctx, arg_csrrci * a)
     }
 }
 
-// static bool trans_cube(DisasContext *ctx, arg_cube *a)
-// {
-//     gen_helper_cube(tcg_env, tcg_constant_tl(a->rd), tcg_constant_tl(a->rs1));
-//     return true;
-// }
-
 static bool trans_cube(DisasContext *ctx, arg_cube *a)
 {
-    TCGv dest = tcg_temp_new(); // 申请一个临时变量
-    TCGv rd = get_gpr(ctx, a->rd, EXT_NONE); // 获取 rd 寄存器
-    // 读取 rs1 寄存器的值指向的内存的值，存储到 dest 中
-    tcg_gen_qemu_ld_tl(dest, get_gpr(ctx, a->rs1, EXT_NONE), ctx->mem_idx, MO_TEUQ);
-    // 计算 cube 并存储到 rd 寄存器中
-    tcg_gen_mul_tl(rd, dest, dest); // rd = dest * dest
-    tcg_gen_mul_tl(rd, rd, dest); // rd = rd * dest
-    gen_set_gpr(ctx, a->rd, rd);
+    gen_helper_cube(tcg_env, tcg_constant_tl(a->rd), tcg_constant_tl(a->rs1));
     return true;
 }
