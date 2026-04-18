@@ -1635,3 +1635,97 @@ static bool trans_vmax(DisasContext *ctx, arg_vmax *a)
     gen_set_gpr(ctx, a->rd, max_ex);
     return true;
 }
+
+static bool trans_gemm(DisasContext *ctx, arg_gemm *a)
+{
+    MemOp mop = MO_32 | mo_endian(ctx);
+    TCGv A_base  = tcg_temp_new();
+    TCGv B_base  = tcg_temp_new();
+    TCGv C_base  = tcg_temp_new();
+    TCGv A_row  = tcg_temp_new();
+    TCGv B_col  = tcg_temp_new();
+    TCGv C_row  = tcg_temp_new();
+    TCGv A_addr  = tcg_temp_new();
+    TCGv B_addr  = tcg_temp_new();
+    TCGv C_addr  = tcg_temp_new();
+    TCGv DIM = tcg_constant_tl(4);
+    TCGv row_stride = tcg_constant_tl(4);
+    TCGv i = tcg_temp_new();
+    TCGv j = tcg_temp_new();
+    TCGv k = tcg_temp_new();
+    TCGv_i32 va   = tcg_temp_new_i32();
+    TCGv_i32 vb   = tcg_temp_new_i32();
+    TCGv_i64 ea   = tcg_temp_new_i64();
+    TCGv_i64 eb   = tcg_temp_new_i64();
+    TCGv_i64 prod = tcg_temp_new_i64();
+    TCGv_i64 acc  = tcg_temp_new_i64();
+    TCGv_i32 acc_i32  = tcg_temp_new_i32();
+
+
+    tcg_gen_mov_tl(A_base, get_gpr(ctx, a->rs1, EXT_NONE));
+    tcg_gen_mov_tl(B_base, get_gpr(ctx, a->rs2, EXT_NONE));
+    tcg_gen_mov_tl(C_base, get_gpr(ctx, a->rd, EXT_NONE));
+    tcg_gen_mov_tl(A_row, A_base);
+    tcg_gen_mov_tl(C_row, C_base);
+    /* row stride = DIM * 4 */
+    tcg_gen_shli_tl(row_stride, DIM, 2);
+
+    /* loop_i */
+    TCGLabel *l_i_loop = gen_new_label();
+    TCGLabel *l_i_end  = gen_new_label();
+    tcg_gen_movi_tl(i, 0); /* i = 0; */
+
+    gen_set_label(l_i_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, i, DIM, l_i_end); /* if i < DIM */
+
+    /* loop_j */
+    TCGLabel *l_j_loop = gen_new_label();
+    TCGLabel *l_j_end  = gen_new_label();
+    tcg_gen_movi_tl(j, 0); /* j = 0; */
+    tcg_gen_movi_i64(acc, 0);
+    tcg_gen_mov_tl(B_col, B_base);
+    tcg_gen_mov_tl(C_addr, C_row);
+
+    gen_set_label(l_j_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, j, DIM, l_j_end); /* if j < DIM */
+
+    /* loop_k */
+    TCGLabel *l_k_loop = gen_new_label();
+    TCGLabel *l_k_end  = gen_new_label();
+    tcg_gen_movi_tl(k, 0); /* k = 0; */
+    tcg_gen_mov_tl(A_addr, A_row);
+    tcg_gen_mov_tl(B_addr, B_col);
+
+    gen_set_label(l_j_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, k, DIM, l_k_end); /* if k < DIM */
+
+    /* acc += (INT64)A[i][k] * (INT64)B[k][j] */
+    tcg_gen_qemu_ld_i32(va, A_addr, ctx->mem_idx, mop);
+    tcg_gen_qemu_ld_i32(vb, B_addr, ctx->mem_idx, mop);
+    tcg_gen_ext_i32_i64(ea, va);
+    tcg_gen_ext_i32_i64(eb, vb);
+    tcg_gen_mul_i64(prod, ea, eb);
+    tcg_gen_add_i64(acc, acc, prod);
+    tcg_gen_extrl_i64_i32(acc_i32, acc); /* truncate acc to i32 */
+    tcg_gen_qemu_st_i32(acc_i32, C_addr, ctx->mem_idx, mop);
+
+    tcg_gen_add_tl(B_addr, B_addr, row_stride);  /* next row in B */
+    tcg_gen_addi_tl(A_addr, A_addr, 4);  /* next col in A */
+    tcg_gen_addi_tl(k, k, 1); /* k++ */
+    tcg_gen_br(l_k_loop);
+    gen_set_label(l_k_end);
+
+    tcg_gen_addi_tl(B_col, B_col, 4);  /* next col in B */
+    tcg_gen_addi_tl(C_addr, C_addr, 4);  /* next col in C */
+    tcg_gen_addi_tl(j, j, 1); /* j++ */
+    tcg_gen_br(l_j_loop);
+    gen_set_label(l_j_end);
+
+    tcg_gen_add_tl(A_row, A_row, row_stride);  /* next row in A */
+    tcg_gen_add_tl(C_row, C_row, row_stride);  /* next row in C */
+    tcg_gen_addi_tl(i, i, 1); /* i++ */
+    tcg_gen_br(l_i_loop);
+    gen_set_label(l_i_end);
+    
+    return true;
+}
