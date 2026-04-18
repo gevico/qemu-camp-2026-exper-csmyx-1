@@ -1366,7 +1366,7 @@ static bool trans_sort(DisasContext *ctx, arg_sort *a)
 
 static bool trans_crush(DisasContext *ctx, arg_crush *a)
 {
-    MemOp mop = MO_8;
+    MemOp mop = MO_8 | mo_endian(ctx);
     TCGv N = tcg_temp_new();
     TCGv src_base = tcg_temp_new();
     TCGv dst_base = tcg_temp_new();
@@ -1429,7 +1429,7 @@ static bool trans_crush(DisasContext *ctx, arg_crush *a)
 
 static bool trans_expand(DisasContext *ctx, arg_expand *a)
 {
-    MemOp mop = MO_8;
+    MemOp mop = MO_8 | mo_endian(ctx);
     TCGv N        = tcg_temp_new();
     TCGv src_addr = tcg_temp_new();
     TCGv dst_addr = tcg_temp_new();
@@ -1544,6 +1544,47 @@ static bool trans_vrelu(DisasContext *ctx, arg_vrelu *a)
     gen_set_label(l_if_end);
 
     tcg_gen_qemu_st_i32(val, dst_addr, ctx->mem_idx, mop);
+
+    tcg_gen_addi_tl(src_addr, src_addr, 4);
+    tcg_gen_addi_tl(dst_addr, dst_addr, 4);
+    tcg_gen_addi_tl(i, i, 1);
+    tcg_gen_br(l_loop);
+    gen_set_label(l_end);
+
+    return true;
+}
+
+static bool trans_vscale(DisasContext *ctx, arg_vscale *a)
+{
+    MemOp mop = MO_32 | mo_endian(ctx);
+    TCGv src  = tcg_temp_new();
+    TCGv dst  = tcg_temp_new();
+    TCGv N = tcg_constant_tl(16);
+    TCGv i = tcg_temp_new();
+    TCGv_i32 val = tcg_temp_new_i32();
+    TCGv_i64 scale = tcg_temp_new_i64();
+    TCGv_i64 tmp   = tcg_temp_new_i64();
+    TCGv src_addr  = tcg_temp_new();
+    TCGv dst_addr  = tcg_temp_new();
+
+    tcg_gen_mov_tl(src, get_gpr(ctx, a->rs1, EXT_NONE));
+    tcg_gen_mov_tl(dst, get_gpr(ctx, a->rd, EXT_NONE));
+    tcg_gen_mov_tl(src_addr, src);
+    tcg_gen_mov_tl(dst_addr, dst);
+    tcg_gen_mov_i64(scale, get_gpr(ctx, a->rs2, EXT_NONE));
+    tcg_gen_movi_tl(i, 0);
+
+    TCGLabel *l_loop = gen_new_label();
+    TCGLabel *l_end  = gen_new_label();
+    gen_set_label(l_loop);
+    tcg_gen_brcond_tl(TCG_COND_GE, i, N, l_end);
+
+    tcg_gen_qemu_ld_i32(val, src_addr, ctx->mem_idx, mop);
+    tcg_gen_ext_i32_i64(tmp, val); // sign-extend i32 → i64
+    tcg_gen_mul_i64(tmp, tmp, scale);  // full 64-bit multiply
+    tcg_gen_extrl_i64_i32(val, tmp);   // truncate to low 32 bits
+    tcg_gen_qemu_st_i32(val, dst_addr, ctx->mem_idx, mop);
+
 
     tcg_gen_addi_tl(src_addr, src_addr, 4);
     tcg_gen_addi_tl(dst_addr, dst_addr, 4);
